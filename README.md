@@ -12,7 +12,7 @@ This project demonstrates the integration of **sensor interfacing, microcontroll
 
 ## Project Prototype
 
-![Working breadboard implementation](images/project-prototype.jpg)
+![Working breadboard implementation](images/project_prototype.jpg)
 
 *Working prototype featuring the PIC16F877A microcontroller, DHT11 sensor, 16×2 LCD, and DC fan.*
 
