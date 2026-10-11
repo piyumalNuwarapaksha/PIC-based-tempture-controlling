@@ -1,0 +1,236 @@
+
+#include <xc.h>
+#include <stdint.h>
+#include <stdio.h>
+
+#define _XTAL_FREQ 8000000
+
+// PIC16F877A configuration
+#pragma config FOSC = HS
+#pragma config WDTE = OFF
+#pragma config PWRTE = ON
+#pragma config BOREN = ON
+#pragma config LVP = OFF
+#pragma config CPD = OFF
+#pragma config WRT = OFF
+#pragma config CP = OFF
+
+// LCD connections
+#define LCD_RS PORTDbits.RD0
+#define LCD_EN PORTDbits.RD1
+
+// DHT11 data pin
+#define DHT_DATA PORTBbits.RB0
+
+// ---------- LCD FUNCTIONS ----------
+
+void lcd_pulse(void)
+{
+    LCD_EN = 1;
+    __delay_us(5);
+    LCD_EN = 0;
+    __delay_us(50);
+}
+
+void lcd_nibble(unsigned char n)
+{
+    PORTD = (PORTD & 0x0F) | (n & 0xF0);
+    lcd_pulse();
+}
+
+void lcd_command(unsigned char cmd)
+{
+    LCD_RS = 0;
+    lcd_nibble(cmd);
+    lcd_nibble(cmd << 4);
+    __delay_ms(2);
+}
+
+void lcd_data(unsigned char data)
+{
+    LCD_RS = 1;
+    lcd_nibble(data);
+    lcd_nibble(data << 4);
+}
+
+void lcd_string(const char *s)
+{
+    while (*s)
+        lcd_data(*s++);
+}
+
+void lcd_init(void)
+{
+    __delay_ms(20);
+
+    LCD_RS = 0;
+    LCD_EN = 0;
+
+    lcd_nibble(0x30);
+    __delay_ms(5);
+    lcd_nibble(0x30);
+    __delay_us(150);
+    lcd_nibble(0x30);
+    lcd_nibble(0x20);
+
+    lcd_command(0x28);  // 4-bit, 2-line LCD
+    lcd_command(0x0C);  // Display ON
+    lcd_command(0x06);  // Cursor increment
+    lcd_command(0x01);  // Clear display
+}
+
+// ---------- DHT11 FUNCTIONS ----------
+
+// Wait until data pin reaches the requested state.
+// Returns 0 if successful, 1 if timed out.
+unsigned char dht_wait(unsigned char state)
+{
+    unsigned int timeout = 2000;
+
+    while (DHT_DATA != state && timeout > 0)
+    {
+        __delay_us(1);
+        timeout--;
+    }
+
+    return (timeout == 0);
+}
+
+unsigned char dht_read(unsigned char *temperature,
+                       unsigned char *humidity)
+{
+    unsigned char data[5] = {0};
+    unsigned char i, j;
+
+    // Start signal
+    TRISBbits.TRISB0 = 0;
+    PORTBbits.RB0 = 0;
+    __delay_ms(20);
+
+    PORTBbits.RB0 = 1;
+    __delay_us(30);
+    TRISBbits.TRISB0 = 1;
+
+    // Sensor response
+    if (dht_wait(0)) return 0;
+    if (dht_wait(1)) return 0;
+    if (dht_wait(0)) return 0;
+
+    // Read 40 bits
+    for (i = 0; i < 5; i++)
+    {
+        for (j = 0; j < 8; j++)
+        {
+            if (dht_wait(1)) return 0;
+
+            __delay_us(40);
+
+            data[i] <<= 1;
+
+            if (DHT_DATA)
+                data[i] |= 1;
+
+            if (dht_wait(0)) return 0;
+        }
+    }
+
+    // Checksum
+    if ((unsigned char)(data[0] + data[1] +
+                        data[2] + data[3]) != data[4])
+        return 0;
+
+    *humidity = data[0];
+    *temperature = data[2];
+
+    return 1;
+}
+
+// ---------- PWM FAN CONTROL ----------
+
+void pwm_init(void)
+{
+    TRISCbits.TRISC2 = 0;
+
+    PR2 = 124;               // Approximately 4 kHz PWM
+    CCP1CON = 0x0C;          // CCP1 PWM mode
+    CCPR1L = 0;
+
+    T2CON = 0x05;            // Timer2 ON, prescaler 1:4
+}
+
+void fan_speed(unsigned char percent)
+{
+    unsigned int duty;
+
+    if (percent > 100)
+        percent = 100;
+
+    // 0-100% mapped to 0-500 duty counts
+    duty = (unsigned int)percent * 5;
+
+    CCPR1L = duty >> 2;
+    CCP1CONbits.DC1B = duty & 0x03;
+}
+
+// ---------- MAIN PROGRAM ----------
+
+void main(void)
+{
+    unsigned char temp = 0;
+    unsigned char hum = 0;
+    unsigned char speed = 0;
+    char text[17];
+
+    ADCON1 = 0x06;           // Configure analog pins as digital
+    TRISD = 0x00;
+    TRISBbits.TRISB0 = 1;
+    TRISCbits.TRISC2 = 0;
+
+    PORTD = 0;
+    PORTC = 0;
+
+    lcd_init();
+    pwm_init();
+
+    while (1)
+    {
+        if (dht_read(&temp, &hum))
+        {
+            // Fan OFF below 35 C
+            if (temp < 35)
+            {
+                speed = 0;
+            }
+            else
+            {
+                // 30% at 35 C; increases with temperature
+                if (temp >= 50)
+                    speed = 100;
+                else
+                    speed = 30 + ((temp - 35) * 70 / 15);
+            }
+
+            fan_speed(speed);
+
+            lcd_command(0x80);
+            sprintf(text, "Temp: %u C", temp);
+            lcd_string(text);
+
+            lcd_command(0xC0);
+            sprintf(text, "Fan: %u%% RH:%u", speed, hum);
+            lcd_string(text);
+        }
+        else
+        {
+            // Sensor error: turn fan OFF
+            fan_speed(0);
+
+            lcd_command(0x80);
+            lcd_string("Sensor Error    ");
+            lcd_command(0xC0);
+            lcd_string("Check DHT11     ");
+        }
+
+        __delay_ms(1000);
+    }
+}
